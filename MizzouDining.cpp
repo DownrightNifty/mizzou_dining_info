@@ -10,6 +10,18 @@
 #include <libxml/HTMLtree.h>
 #include "httplib.h"
 
+// searches for a child element of node with the provided string "name"
+// results vector must be allocated by the caller
+void getElementsByTagName(xmlNode* node, std::string name, std::vector<xmlNode*>& results) {
+    xmlNode *currNode = NULL;
+    for (currNode = node; currNode; currNode = currNode->next) {
+        if (currNode->type == XML_ELEMENT_NODE && std::string((const char*)currNode->name) == name) {
+            results.push_back(currNode);
+        }
+        getElementsByTagName(currNode->children, name, results);
+    }
+}
+
 struct TimeBlock {
     std::string Label;
     std::chrono::system_clock::time_point Start;
@@ -92,7 +104,7 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
     }
 
     // Parse HTML using libxml2
-    xmlDoc* doc = htmlReadMemory(html.c_str(), html.size() + 1, NULL, NULL, 0);
+    xmlDoc* doc = htmlReadMemory(html.c_str(), html.size() + 1, NULL, NULL, HTML_PARSE_NOERROR);
     if (doc == NULL) {
         std::cerr << "Could not parse HTML." << std::endl;
         return locations;
@@ -100,6 +112,19 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
 
     // Find tables
     xmlNode* root_element = xmlDocGetRootElement(doc);
+
+
+
+    // SMOKE TEST: make sure we can succesfully extract table elements from the document before continuing
+    std::vector<xmlNode*> resultsVec;
+    getElementsByTagName(root_element, "table", resultsVec);
+    for (xmlNode* node : resultsVec) {
+        std::cout << node->name << "\n";
+    }
+
+
+
+
     for (xmlNode* table = root_element->children; table; table = table->next) {
         if (table->type == XML_ELEMENT_NODE && xmlStrEqual(table->name, BAD_CAST "table")) {
             // Process each row in the table
@@ -168,10 +193,12 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
 
 int main() {
     std::string date = "2023-11-20";  // Replace with the desired date
-    bool debugMode = false;  // Set to true for debugging
+    bool debugMode = true;  // Set to true for debugging
 
     std::vector<Location> locations = GetScheduleData(date, debugMode);
+    std::cout << "Successfully parsed\n";
 
+    std::cout << "List of locations:\n";
     // Print information
     for (const auto& location : locations) {
         std::cout << "Name: " << location.Name << std::endl;
