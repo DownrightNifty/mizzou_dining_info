@@ -10,38 +10,6 @@
 #include <libxml/HTMLtree.h>
 #include "httplib.h"
 
-// SMOKE TEST: Print information about all elements in the document
-void printAllElements(xmlNode* node, int depth = 0) {
-    for (xmlNode* currNode = node; currNode; currNode = currNode->next) {
-        if (currNode->type == XML_ELEMENT_NODE) {
-            for (int i = 0; i < depth; ++i) std::cout << "  ";
-            std::cout << "Element Name: " << currNode->name << "\n";
-        }
-        printAllElements(currNode->children, depth + 1);
-    }
-}
-
-// searches for a child element of node with the provided string "name"
-// results vector must be allocated by the caller
-void getElementsByTagName(xmlNode* node, std::string name, std::vector<xmlNode*>& results) {
-    xmlNode *currNode = NULL;
-    for (currNode = node; currNode; currNode = currNode->next) {
-        if (currNode->type == XML_ELEMENT_NODE && std::string((const char*)currNode->name) == name) {
-            results.push_back(currNode);
-        }
-        getElementsByTagName(currNode->children, name, results);
-    }
-}
-
-void getElementByTagName(xmlNode* node, std::string name, xmlNode* result) {
-    xmlNode *currNode = NULL;
-    for (currNode = node; currNode; currNode = currNode->next) {
-        if (currNode->type == XML_ELEMENT_NODE && std::string((const char*)currNode->name) == name) {
-            result = currNode;
-        }
-    }
-}
-
 struct TimeBlock {
     std::string Label;
     std::chrono::system_clock::time_point Start;
@@ -94,6 +62,94 @@ std::chrono::system_clock::time_point StringToTimePoint(const std::string& str) 
     return std::chrono::system_clock::from_time_t(std::mktime(&tm));
 }
 
+// Function to process a table and its rows
+void ProcessTable(xmlNode* table, std::vector<Location>& locations) {
+    // Process each row in the table
+    for (xmlNode* row = table->children; row; row = row->next) {
+        if (row->type == XML_ELEMENT_NODE && xmlStrEqual(row->name, BAD_CAST "tr")) {
+            std::string name;
+            std::vector<TimeBlock> hours;
+
+            // Debug output
+            std::cout << "Processing row elements...\n";
+
+            // Process each column in the row
+            for (xmlNode* col = row->children; col; col = col->next) {
+                if (col->type == XML_ELEMENT_NODE && xmlStrEqual(col->name, BAD_CAST "td")) {
+                    // Process only non-empty text nodes
+                    if (xmlNode* textNode = xmlFirstElementChild(col)) {
+                        std::string value(reinterpret_cast<const char*>(textNode->content));
+
+                        if (col->children && xmlStrEqual(col->children->name, BAD_CAST "br")) {
+                            // Process line break in hoursData
+                            continue;
+                        }
+
+                        if (name.empty()) {
+                            // First column contains the name
+                            name = value;
+                        } else {
+                            // Subsequent columns contain time blocks
+                            std::vector<std::string> timeData;
+                            size_t pos = 0;
+                            while ((pos = value.find(" - ", pos)) != std::string::npos) {
+                                timeData.push_back(value.substr(0, pos));
+                                pos += 3;
+                            }
+                            timeData.push_back(value.substr(pos));
+
+                            // Process timeData to fill the 'hours' vector
+                            for (const auto& time : timeData) {
+                                std::string label; // Assuming label is not available in HTML
+                                hours.emplace_back(TimeBlock{label,
+                                                            StringToTimePoint(time),
+                                                            StringToTimePoint(time)});
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Debug output
+            std::cout << "Row name: " << name << std::endl;
+            std::cout << "Row hours: " << hours.size() << " time blocks\n";
+
+            // Create Location object and add to the list if name is not empty
+            if (!name.empty() && !hours.empty()) {
+                Location location(name, hours);
+                std::cout << "Created Location: " << location.Name << std::endl;
+                std::cout << "Hours:\n" << location.StrHours << std::endl;
+                locations.push_back(location);
+            }
+        }
+    }
+}
+
+// Recursive function to find tables in the HTML structure
+void FindTablesRecursively(xmlNode* node, std::vector<Location>& locations) {
+    for (xmlNode* child = node->children; child; child = child->next) {
+        if (child->type == XML_ELEMENT_NODE && xmlStrEqual(child->name, BAD_CAST "table")) {
+            std::cout << "Processing table elements...\n";
+            ProcessTable(child, locations);
+        }
+
+        // Recursively search for tables in child nodes
+        FindTablesRecursively(child, locations);
+    }
+}
+
+// searches for a child element of node with the provided string "name"
+// results vector must be allocated by the caller
+void getElementsByTagName(xmlNode* node, std::string name, std::vector<xmlNode*>& results) {
+    xmlNode *currNode = NULL;
+    for (currNode = node; currNode; currNode = currNode->next) {
+        if (currNode->type == XML_ELEMENT_NODE && std::string((const char*)currNode->name) == name) {
+            results.push_back(currNode);
+        }
+        getElementsByTagName(currNode->children, name, results);
+    }
+}
+
 std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
     std::vector<Location> locations;
 
@@ -130,90 +186,8 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
         return locations;
     }
 
-    // Find tables
-    xmlNode* root_element = xmlDocGetRootElement(doc);
+    FindTablesRecursively(xmlDocGetRootElement(doc), locations);
 
-
-
-    // SMOKE TEST: make sure we can succesfully extract table elements from the document before continuing
-    std::vector<xmlNode*> tablesVec;
-    std::vector<xmlNode*> rowsVec;
-    getElementsByTagName(root_element, "table", tablesVec);
-    getElementsByTagName(root_element, "tr", rowsVec);
-    for (xmlNode* node : tablesVec) {
-        std::cout << node->name << "\n";
-    }
-    for (xmlNode* nodes : rowsVec) {
-        std::cout << nodes->name << "\n";
-    }
-
-    printAllElements(root_element);
-
-
-
-
-    for (xmlNode* table = root_element->children; table; table = table->next) {
-        if (table->type == XML_ELEMENT_NODE && xmlStrEqual(table->name, BAD_CAST "table")) {
-            std::cout << "Processing table elements...\n";
-            // Process each row in the table
-            for (xmlNode* row = table->children; row; row = row->next) {
-                std::cout << "Processing row elements...\n";
-                if (row->type == XML_ELEMENT_NODE && xmlStrEqual(row->name, BAD_CAST "tr")) {
-                    std::string name;
-                    std::vector<TimeBlock> hours;
-
-                    // Process each column in the row
-                    for (xmlNode* col = row->children; col; col = col->next) {
-                        if (col->type == XML_ELEMENT_NODE && xmlStrEqual(col->name, BAD_CAST "td")) {
-                            // Process only non-empty text nodes
-                            if (xmlNode* textNode = xmlFirstElementChild(col)) {
-                                std::string value(reinterpret_cast<const char*>(textNode->content));
-
-                                if (col->children && xmlStrEqual(col->children->name, BAD_CAST "br")) {
-                                    // Process line break in hoursData
-                                    continue;
-                                }
-
-                                if (name.empty()) {
-                                    // First column contains the name
-                                    name = value;
-                                } else {
-                                    // Subsequent columns contain time blocks
-                                    std::vector<std::string> timeData;
-                                    size_t pos = 0;
-                                    while ((pos = value.find(" - ", pos)) != std::string::npos) {
-                                        timeData.push_back(value.substr(0, pos));
-                                        pos += 3;
-                                    }
-                                    timeData.push_back(value.substr(pos));
-
-                                    if (timeData.size() == 1) {
-                                        // Single time block
-                                        std::string label;
-                                        hours.emplace_back(TimeBlock{label,
-                                                                    StringToTimePoint(timeData[0]),
-                                                                    StringToTimePoint(timeData[0])});
-                                    } else {
-                                        // Multiple time blocks
-                                        for (size_t i = 0; i + 1 < timeData.size(); i += 2) {
-                                            std::string label = timeData[i];
-                                            hours.emplace_back(TimeBlock{label,
-                                                                        StringToTimePoint(timeData[i + 1]),
-                                                                        StringToTimePoint(timeData[i + 1])});
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Create Location object and add to the list
-                    locations.emplace_back(name, hours);
-                }
-            }
-
-        }
-    }
 
     xmlFreeDoc(doc);
     xmlCleanupParser();
@@ -222,7 +196,7 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
 }
 
 int main() {
-    std::string date = "2023-11-29";  // Replace with the desired date
+    std::string date = "2023-12-02";  // Replace with the desired date
     bool debugMode = true;  // Set to true for debugging
 
     std::vector<Location> locations = GetScheduleData(date, debugMode);
@@ -230,12 +204,18 @@ int main() {
 
     std::cout << "List of locations:\n";
     // Print information
-    for (const auto& location : locations) {
-        std::cout << "Name: " << location.Name << std::endl;
-        std::cout << "Hours:\n" << location.StrHours << std::endl;
-        std::cout << "Open: " << (location.Open ? "Yes" : "No") << std::endl;
-        std::cout << "====================\n";
+    if (locations.empty()) {
+        std::cout << "Locations vector is empty" << std::endl;
     }
+    else {
+        for (const auto& location : locations) {
+            std::cout << "Name: " << location.Name << std::endl;
+            std::cout << "Hours:\n" << location.StrHours << std::endl;
+            std::cout << "Open: " << (location.Open ? "Yes" : "No") << std::endl;
+            std::cout << "====================\n";
+        }
+    }
+    
 
     return 0;
 }
