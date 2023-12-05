@@ -91,6 +91,7 @@ struct HardCodedLocation {
 
 struct Location {
     std::string name;
+    // note that 0.0 is a valid value for these if a corresponding HardCodedLocation wasn't found
     double latitude;
     double longitude;
     std::string strHours;
@@ -325,7 +326,7 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
             }
 
             std::vector<TimeBlock> timeBlocks = parseHrsStr(hrsStr);
-            Location l{locName, 0, 0, timeBlocks};
+            Location l{locName, 0.0, 0.0, timeBlocks};
             // initialize the 'open' flag based on the current time
             l.checkIfOpen();
             locations.push_back(l);
@@ -383,7 +384,7 @@ int main() {
     std::vector<Location> locations = GetScheduleData(date, D_MODE);
 
     // std::vector<TimeBlock> testTimeBlocks = parseHrsStr("10:00 AM - 3:00 PM");
-    // Location testLoc{"Test", 0, 0, testTimeBlocks};
+    // Location testLoc{"Test", 0.0, 0.0, testTimeBlocks};
     // testLoc.checkIfOpen();
     // locations.push_back(testLoc);
 
@@ -404,7 +405,7 @@ int main() {
     //     locations[i].latitude = hardcodedLocations[i].latitude;
     //     locations[i].longitude = hardcodedLocations[i].longitude;
     // }
-    
+
     std::cout << "Successfully parsed\n";
     std::cout << "List of locations:\n";
     std::cout << "====================\n";
