@@ -346,7 +346,6 @@ int searchByName(const std::vector<HardCodedLocation>& hcls, std::string name, H
         if (hcl.name == name) {
             *out = hcl;
             return 1;
-            break;
         }
     }
     return 0;
