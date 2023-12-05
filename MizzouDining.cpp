@@ -1,153 +1,252 @@
+#include <string>
 #include <iostream>
 #include <vector>
-#include <string>
-#include <chrono>
-#include <iomanip>
-#include <sstream>
+#include <cctype>
+#include <ctime>
 #include <fstream>
 
 #include <libxml/HTMLparser.h>
 #include <libxml/HTMLtree.h>
 #include "httplib.h"
 
-struct TimeBlock {
-    std::string Label;
-    std::chrono::system_clock::time_point Start;
-    std::chrono::system_clock::time_point End;
+#define D_MODE true // use the cached HTML file instead of live data
+#define D_TIME false // use a fake value for current time instead of the real time
+#define D_TIME_VAL "1:00 PM"
 
-    // Function to convert std::chrono::time_point to a formatted string
-    std::string TimePointToString(const std::chrono::system_clock::time_point& timePoint) const {
-        auto time = std::chrono::system_clock::to_time_t(timePoint);
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
-        return ss.str();
+// convert time str (relative to today's date) to an int for comparison
+// the int is simply the number of minutes since the start of the day
+int timeStrToInt(std::string timeStr) {
+    // timeStr is like "6:30 AM"
+
+    // std::size_t pos = timeStr.find(":");
+    int pos = timeStr.find(":");
+    int hr12 = stoi(timeStr.substr(0, pos));
+    int min = stoi(timeStr.substr(pos + 1, 2));
+
+    // first convert to 24hr
+    int hr24;
+    if (timeStr.substr(timeStr.size() - 2, 2) == "AM") {
+        if (hr12 == 12) {
+            hr24 = 0;
+        }
+        else {
+            hr24 = hr12;
+        }
+    }
+    else {
+        if (hr12 == 12) {
+            hr24 = 12;
+        }
+        else {
+            hr24 = hr12 + 12;
+        }
+    }
+
+    // finally, convert entire time to a single int
+    return min + hr24*60;
+}
+
+std::string intToTimeStr(int timeInt) {
+    int hr24 = timeInt / 60;
+    int min = timeInt % 60;
+
+    int hr12;
+    bool isAM;
+    if (hr24 == 0) { hr12 = 12; isAM = true; }
+    else if (hr24 == 12) { hr12 = 12; isAM = false; }
+    else if (hr24 < 12) {
+        hr12 = hr24; isAM = true;
+    }
+    else { // hr24 >= 13
+        hr12 = hr24 - 12; isAM = false;
+    }
+
+    std::string pStr;
+    if (isAM) { pStr = " AM"; }
+    else { pStr = " PM"; }
+    std::string minStr;
+    if (min < 10) { minStr = "0" + std::to_string(min); }
+    else { minStr = std::to_string(min); }
+    std::string hr12Str = std::to_string(hr12);
+    return hr12Str + ":" + minStr + pStr;
+}
+
+struct TimeBlock {
+    std::string label;
+    int start;
+    int end;
+
+    TimeBlock(std::string _label, int _start, int _end)
+        : label(_label), start(_start), end(_end) {
+        // std::cout << "creating TimeBlock from " << start << " to " << end << "\n";
     }
 };
 
+// TODO: add GPS coordinates for each location
+// these aren't returned by the server so they'd have to be hardcoded
 struct Location {
-    std::string Name;
-    std::string StrHours;
-    bool Favorite;
-    bool Open;
-    std::vector<TimeBlock> Hours;
+    std::string name;
+    std::string strHours;
+    bool favorite;
+    bool open;
+    std::vector<TimeBlock> hours;
 
-    Location(const std::string& name, const std::vector<TimeBlock>& hours)
-        : Name(name), Hours(hours), Favorite(false), Open(false) {
-        // Initialize the 'Open' flag based on the current time
-        auto now = std::chrono::system_clock::now();
-        for (const auto& timeBlock : Hours) {
-            if (timeBlock.Start <= now && now <= timeBlock.End) {
-                Open = true;
+    Location(const std::string& _name, const std::vector<TimeBlock>& _hours)
+        : name(_name), hours(_hours), favorite(false), open(false) {
+        // create a nice string representation of the data
+        strHours = "";
+        for (TimeBlock tb : hours) {
+            strHours += tb.label + ": " + intToTimeStr(tb.start) + " to " + intToTimeStr(tb.end) + "\n";
+        }
+    }
+
+    // check if this location is open by comparing the current time with the scheduled hours
+    // (it only makes sense to call this if the hours are for the current date)
+    void checkIfOpen() {
+        int nowInt;
+        if (!D_TIME) {
+            time_t t = time(NULL);
+            struct tm* tmPtr = localtime(&t);
+            nowInt = tmPtr->tm_min + tmPtr->tm_hour*60;
+        }
+        else {
+            nowInt = timeStrToInt(D_TIME_VAL);
+        }
+
+        for (TimeBlock timeBlock : hours) {
+            if (timeBlock.start <= nowInt && nowInt <= timeBlock.end) {
+                open = true;
                 break;
             }
         }
-
-        // Generate the formatted hours string
-        for (size_t i = 0; i < Hours.size() - 1; ++i) {
-            StrHours += Hours[i].Label.empty() ? "" : Hours[i].Label + ": ";
-            StrHours += Hours[i].TimePointToString(Hours[i].Start) + " to " +
-                        Hours[i].TimePointToString(Hours[i].End) + "\n";
-        }
-        StrHours += Hours.back().Label.empty() ? "" : Hours.back().Label + ": ";
-        StrHours += Hours.back().TimePointToString(Hours.back().Start) + " to " +
-                    Hours.back().TimePointToString(Hours.back().End);
     }
 };
 
-// Function to convert string to std::chrono::time_point
-std::chrono::system_clock::time_point StringToTimePoint(const std::string& str) {
-    std::tm tm = {};
-    std::istringstream ss(str);
-    ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
-    return std::chrono::system_clock::from_time_t(std::mktime(&tm));
-}
+// hrsStr may have multiple blocks and look like this:
+// "[spaces]Lunch[spaces]11:00 AM - 2:00 PM[spaces]Dinner[spaces]4:00 PM - 8:00 PM[spaces]"
+// OR just one:
+// "[spaces]11:00 AM - 2:00 PM[spaces]"
+std::vector<TimeBlock> parseHrsStr(std::string hrsStr) {
+    std::vector<TimeBlock> timeBlocks;
 
-// Function to process a table and its rows
-void ProcessTable(xmlNode* table, std::vector<Location>& locations) {
-    // Process each row in the table
-    for (xmlNode* row = table->children; row; row = row->next) {
-        if (row->type == XML_ELEMENT_NODE && xmlStrEqual(row->name, BAD_CAST "tr")) {
-            std::string name;
-            std::vector<TimeBlock> hours;
+    // trim hrsStr
+    int beginIdx = 0;
+    while (std::isspace(hrsStr[beginIdx])) { beginIdx++; }
+    int endIdx = hrsStr.size() - 4;
+    while (std::isspace(hrsStr[endIdx])) { endIdx--; }
+    hrsStr = hrsStr.substr(beginIdx, endIdx - beginIdx + 1);
 
-            // Debug output
-            std::cout << "Processing row elements...\n";
+    // now it looks like: "Lunch[spaces]11:00 AM - 2:00 PM[spaces]Dinner[spaces]4:00 PM - 8:00 PM"
+    // or: "11:00 AM - 2:00 PM"
+    // std::cout << "`" << hrsStr << "`\n";
 
-            // Process each column in the row
-            for (xmlNode* col = row->children; col; col = col->next) {
-                if (col->type == XML_ELEMENT_NODE && xmlStrEqual(col->name, BAD_CAST "td")) {
-                    // Process only non-empty text nodes
-                    if (xmlNode* textNode = xmlFirstElementChild(col)) {
-                        std::string value(reinterpret_cast<const char*>(textNode->content));
+    // HACK: should use std::string::find(str, pos) instead
+    // a view into a part of hrsStr, starting with the whole thing and shrinking from the left
+    std::string hrsStrView = hrsStr; int pos = 0;
 
-                        if (col->children && xmlStrEqual(col->children->name, BAD_CAST "br")) {
-                            // Process line break in hoursData
-                            continue;
-                        }
-
-                        if (name.empty()) {
-                            // First column contains the name
-                            name = value;
-                        } else {
-                            // Subsequent columns contain time blocks
-                            std::vector<std::string> timeData;
-                            size_t pos = 0;
-                            while ((pos = value.find(" - ", pos)) != std::string::npos) {
-                                timeData.push_back(value.substr(0, pos));
-                                pos += 3;
-                            }
-                            timeData.push_back(value.substr(pos));
-
-                            // Process timeData to fill the 'hours' vector
-                            for (const auto& time : timeData) {
-                                std::string label; // Assuming label is not available in HTML
-                                hours.emplace_back(TimeBlock{label,
-                                                            StringToTimePoint(time),
-                                                            StringToTimePoint(time)});
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Debug output
-            std::cout << "Row name: " << name << std::endl;
-            std::cout << "Row hours: " << hours.size() << " time blocks\n";
-
-            // Create Location object and add to the list if name is not empty
-            if (!name.empty() && !hours.empty()) {
-                Location location(name, hours);
-                std::cout << "Created Location: " << location.Name << std::endl;
-                std::cout << "Hours:\n" << location.StrHours << std::endl;
-                locations.push_back(location);
-            }
-        }
+    // HACK: if the first char is a number, we have form #2
+    if (std::isdigit(hrsStr[0])) {
+        pos = hrsStrView.find(" ");
+        std::string startTimeStr = hrsStrView.substr(0, pos);
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        pos = hrsStrView.find(" ");
+        std::string startTimePStr = hrsStrView.substr(0, pos);
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        pos = hrsStrView.find(" ");
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        pos = hrsStrView.find(" ");
+        std::string endTimeStr = hrsStrView.substr(0, pos);
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        std::string endTimePStr = hrsStrView;
+        std::string startStr = startTimeStr + " " + startTimePStr;
+        std::string endStr = endTimeStr + " " + endTimePStr;
+        timeBlocks.push_back(TimeBlock{"Hours", timeStrToInt(startStr), timeStrToInt(endStr)});
+        return timeBlocks;
     }
-}
 
-// Recursive function to find tables in the HTML structure
-void FindTablesRecursively(xmlNode* node, std::vector<Location>& locations) {
-    for (xmlNode* child = node->children; child; child = child->next) {
-        if (child->type == XML_ELEMENT_NODE && xmlStrEqual(child->name, BAD_CAST "table")) {
-            std::cout << "Processing table elements...\n";
-            ProcessTable(child, locations);
+    while (true) {
+        pos = hrsStrView.find(" "); // the first of many
+        std::string label = hrsStrView.substr(0, pos);
+        // std::cout << label << "\n";
+
+        while (std::isspace(hrsStrView[pos])) { pos++; }
+        hrsStrView = hrsStrView.substr(pos, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+
+        pos = hrsStrView.find(" ");
+        std::string startTimeStr = hrsStrView.substr(0, pos);
+        // std::cout << startTimeStr << "\n";
+
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+
+        pos = hrsStrView.find(" ");
+        std::string startTimePStr = hrsStrView.substr(0, pos);
+        // std::cout << startTimePStr << "\n";
+
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+
+        pos = hrsStrView.find(" ");
+
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+
+        pos = hrsStrView.find(" ");
+        std::string endTimeStr = hrsStrView.substr(0, pos);
+        // std::cout << endTimeStr << "\n";
+
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+
+        std::string endTimePStr;
+        pos = hrsStrView.find(" ");
+        bool done = false;
+        if (pos == -1) {
+            endTimePStr = hrsStrView;
+            done = true;
         }
 
-        // Recursively search for tables in child nodes
-        FindTablesRecursively(child, locations);
+        if (!done) { endTimePStr = hrsStrView.substr(0, pos); }
+        // std::cout << "endTimePStr: " << endTimePStr << "\n";
+
+        std::string startStr = startTimeStr + " " + startTimePStr;
+        std::string endStr = endTimeStr + " " + endTimePStr;
+        timeBlocks.push_back(TimeBlock{label, timeStrToInt(startStr), timeStrToInt(endStr)});
+
+        if (done) { break; }
+
+        hrsStrView = hrsStrView.substr(pos + 1, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+        pos = 0;
+
+        // there's a lot of spaces now so we skip over them
+        while (std::isspace(hrsStrView[pos])) { pos++; }
+        hrsStrView = hrsStrView.substr(pos, hrsStrView.size() - 1);
+        // std::cout << "`" << hrsStrView << "`\n";
+    }
+
+    return timeBlocks;
+}
+
+// NOTE: `xmlNode->children` might as well have been named `xmlNode->firstChild`, because that's what it is
+// it can be treated as a linked list of children using `xmlNode->children->next`
+
+// searches for a child (or sibling) element of node with the provided string "name"
+void _getElementsByTagName(xmlNode* node, std::string name, std::vector<xmlNode*>& results) {
+    xmlNode* currNode = NULL;
+    for (currNode = node; currNode; currNode = currNode->next) {
+        if (currNode->type == XML_ELEMENT_NODE && std::string((const char*)currNode->name) == name) {
+            results.push_back(currNode);
+        }
+        _getElementsByTagName(currNode->children, name, results);
     }
 }
 
 // searches for a child element of node with the provided string "name"
 // results vector must be allocated by the caller
 void getElementsByTagName(xmlNode* node, std::string name, std::vector<xmlNode*>& results) {
-    xmlNode *currNode = NULL;
-    for (currNode = node; currNode; currNode = currNode->next) {
-        if (currNode->type == XML_ELEMENT_NODE && std::string((const char*)currNode->name) == name) {
-            results.push_back(currNode);
-        }
-        getElementsByTagName(currNode->children, name, results);
-    }
+    _getElementsByTagName(node->children, name, results);
 }
 
 std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
@@ -180,14 +279,52 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
     }
 
     // Parse HTML using libxml2
+    // TODO: error checking for malformed HTML document from server
     xmlDoc* doc = htmlReadMemory(html.c_str(), html.size() + 1, NULL, NULL, HTML_PARSE_NOERROR);
     if (doc == NULL) {
         std::cerr << "Could not parse HTML." << std::endl;
         return locations;
     }
 
-    FindTablesRecursively(xmlDocGetRootElement(doc), locations);
+    xmlNode* root = xmlDocGetRootElement(doc);
+    std::vector<xmlNode*> results;
+    getElementsByTagName(root, "tr", results);
+    // std::cout << results.size() << " results:\n";
+    for (xmlNode* node : results) {
+        // std::cout << "found " << node->name << " with content: \n";
+        std::vector<xmlNode*> tdResults;
+        getElementsByTagName(node, "td", tdResults);
+        // there are always two result nodes, unless we're on a header row
+        if (tdResults.size() == 2) {
+            std::string locName;
+            std::string hrsStr;
+            for (int i = 0; i < 2; i++) {
+                xmlNode* tdElem = tdResults[i];
+                if (i == 0) {
+                    // the first column is the name of the location, but it's nested in an <a> element
+                    // there's actually multiple children of the <td>, including raw text nodes
+                    // the <a> is the second child
+                    xmlNode* aElem = tdElem->children->next;
+                    xmlChar* key = xmlNodeListGetString(doc, aElem->children, 1);
+                    locName = (const char*)key;
+                    xmlFree(key);
+                }
+                else {
+                    // the second column is the hours
+                    xmlChar* key = xmlNodeListGetString(doc, tdElem->children, 1);
+                    hrsStr = (const char*)key;
+                    xmlFree(key);
+                }
+            }
 
+            std::vector<TimeBlock> timeBlocks = parseHrsStr(hrsStr);
+            Location l{locName, timeBlocks};
+            // initialize the 'open' flag based on the current time
+            l.checkIfOpen();
+            locations.push_back(l);
+        }
+        // std::cout << "\n\n";
+    }
 
     xmlFreeDoc(doc);
     xmlCleanupParser();
@@ -196,26 +333,24 @@ std::vector<Location> GetScheduleData(const std::string& date, bool debugMode) {
 }
 
 int main() {
-    std::string date = "2023-12-02";  // Replace with the desired date
-    bool debugMode = true;  // Set to true for debugging
+    std::string date = "2023-12-04";  // Replace with the desired date
 
-    std::vector<Location> locations = GetScheduleData(date, debugMode);
+    std::vector<Location> locations = GetScheduleData(date, D_MODE);
     std::cout << "Successfully parsed\n";
-
     std::cout << "List of locations:\n";
+    std::cout << "====================\n";
     // Print information
     if (locations.empty()) {
         std::cout << "Locations vector is empty" << std::endl;
     }
     else {
         for (const auto& location : locations) {
-            std::cout << "Name: " << location.Name << std::endl;
-            std::cout << "Hours:\n" << location.StrHours << std::endl;
-            std::cout << "Open: " << (location.Open ? "Yes" : "No") << std::endl;
+            std::cout << "Name: " << location.name << std::endl;
+            std::cout << location.strHours;
+            std::cout << "Open: " << (location.open ? "Yes" : "No") << std::endl;
             std::cout << "====================\n";
         }
     }
-    
 
     return 0;
 }
